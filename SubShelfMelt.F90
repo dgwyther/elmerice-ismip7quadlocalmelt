@@ -124,16 +124,16 @@
   INTEGER, POINTER :: TF_Perm(:), deltaTF_Perm(:), abmb_perm(:)
 
   ! parameters for the new ISMIP7 parameterisation (see https://www.climate-cryosphere.org/wiki/index.php?title=ISMIP6-Projections-Antarctica#Oceanic_forcing:_temperature.2C_salinity.2C_thermal_forcing_and_melt_rate_parameterization)
-  TYPE(Variable_t), POINTER :: Tloc_var, Tfloc_var, Sloc_var, sinTheta_var, fCoriolis_var
-  TYPE(Variable_t), POINTER :: draftGradient_var, latitude_var
-  INTEGER, POINTER :: Tloc_Perm(:), Tfloc_Perm(:), Sloc_Perm(:), sinTheta_Perm(:), fCoriolis_Perm(:)
-  INTEGER, POINTER :: draftGradient_Perm(:), latitude_Perm(:)
-  REAL(KIND=dp), POINTER :: Tloc_vals(:), Tfloc_vals(:), Sloc_vals(:), sinTheta_vals(:), fCoriolis_vals(:)
-  REAL(KIND=dp), POINTER :: draftGradient_vals(:), latitude_vals(:)
-  REAL (KIND=dp)           :: K, betaS, Gravity, earthRotationRate, secondsPerYear
-  REAL (KIND=dp)           :: maxCoriolisYr, maxCoriolisPerSecond
-  REAL (KIND=dp)           :: Tloc, Tfloc, Sloc, sinTheta, meanSinTheta, fCoriolis
-  REAL (KIND=dp)           :: draftGradX, draftGradY, draftSlope, latitude
+  TYPE(Variable_t), POINTER   :: Tloc_var, Tfloc_var, Sloc_var, sinTheta_var, fCoriolis_var
+  TYPE(Variable_t), POINTER   :: draftGradient_var, latitude_var
+  INTEGER, POINTER            :: Tloc_Perm(:), Tfloc_Perm(:), Sloc_Perm(:), sinTheta_Perm(:), fCoriolis_Perm(:)
+  INTEGER, POINTER            :: draftGradient_Perm(:), latitude_Perm(:)
+  REAL(KIND=dp), POINTER      :: Tloc_vals(:), Tfloc_vals(:), Sloc_vals(:), sinTheta_vals(:), fCoriolis_vals(:)
+  REAL(KIND=dp), POINTER      :: draftGradient_vals(:), latitude_vals(:)
+  REAL (KIND=dp)              :: K, betaS, Gravity, earthRotationRate, secondsPerYear
+  REAL (KIND=dp)              :: maxCoriolisYr, maxCoriolisPerSecond
+  REAL (KIND=dp)              :: Tloc, Tfloc, Sloc, sinTheta, meanSinTheta, fCoriolis
+  REAL (KIND=dp)              :: draftGradX, draftGradY, draftSlope, latitude
 
   ! parameters to be read in from this solvers section in the sif 
   CHARACTER(LEN=MAX_NAME_LEN) :: meltFunc         ! which melt function to be used
@@ -541,12 +541,13 @@
         END IF
      
      CASE('QuadraticLocal','quadratic-local','ismip7','ISMIP7','ismip7-localquad')
-        ! Burgard et al. (2022) local-quadratic melt parameterisation, with
-        ! either an Antarctic-mean or a local ice-draft slope:
-        ! m = K*(rho_o/rho_i)*(c_o/L_i)^2*beta_S*S*g/(2*abs(f))
-        !       *sin(theta)*abs(T-T_f)*(T-T_f).
-        ! Here m is positive for melting, whereas the Elmer bmb variable is
-        ! bottom-surface accumulation and is therefore stored as bmb = -m.
+         !  quadratic-local (aka ismip7-localquad) - local quadratic melt parameterisation
+         !  of Burgard et al. (2023), sensitive to slope (local or mean), salinity and Coriolis effects:
+         !  m = K * (rho_oc/rho_i) * (c_oc/L_i)^2 * betaS * Sloc * g/(2|f|)
+         !        * sin(theta) * |Tloc - Tfloc| * (Tloc - Tfloc)
+         ! D. Gwyther, C. Zhao. 2026
+         ! Here m is positive for melting, whereas the Elmer bmb variable is
+         ! bottom-surface accumulation and is therefore stored as bmb = -m.
         prefactor = (rhoo / rhoi) * (SWCp / Lf)**2.0_dp
         Tloc      = Tloc_vals(Tloc_Perm(ii))
         Tfloc     = Tfloc_vals(Tfloc_Perm(ii))
