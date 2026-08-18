@@ -134,18 +134,19 @@
   REAL (KIND=dp)              :: maxCoriolisYr, maxCoriolisPerSecond
   REAL (KIND=dp)              :: Tloc, Tfloc, Sloc, sinTheta, meanSinTheta, fCoriolis
   REAL (KIND=dp)              :: draftGradX, draftGradY, draftSlope, latitude
-
-  ! parameters to be read in from this solvers section in the sif 
-  CHARACTER(LEN=MAX_NAME_LEN) :: meltFunc         ! which melt function to be used
-  CHARACTER(LEN=MAX_NAME_LEN) :: lowerSurfName    ! name of the variable within Elmer
-  CHARACTER(LEN=MAX_NAME_LEN) :: groundedMaskName ! name of the variable within Elmer
-  CHARACTER(LEN=MAX_NAME_LEN) :: bedrockName      ! " "  (bedrock = bathymmetry under the ice shelf)
   CHARACTER(LEN=MAX_NAME_LEN) :: draftGradientName
   CHARACTER(LEN=MAX_NAME_LEN) :: latitudeName
   CHARACTER(LEN=MAX_NAME_LEN) :: coriolisUnits
   REAL (KIND=dp)              :: omega            ! melt rate tuning parameter
   REAL (KIND=dp)              :: T_far            ! the far field ocean temperature
   LOGICAL                     :: glMelt, wct_sc, useDraftGradient, useMeanSlope, useLatitude
+  LOGICAL                     :: useBasinDeltaT
+
+  ! parameters to be read in from this solvers section in the sif 
+  CHARACTER(LEN=MAX_NAME_LEN) :: meltFunc         ! which melt function to be used
+  CHARACTER(LEN=MAX_NAME_LEN) :: lowerSurfName    ! name of the variable within Elmer
+  CHARACTER(LEN=MAX_NAME_LEN) :: groundedMaskName ! name of the variable within Elmer
+  CHARACTER(LEN=MAX_NAME_LEN) :: bedrockName      ! " "  (bedrock = bathymmetry under the ice shelf)
   
   REAL (KIND=dp)           :: anomFactor, preFactor
   REAL (KIND=dp)           :: TF, DeltaTF, gamma0
@@ -218,6 +219,8 @@
   useDraftGradient = .FALSE.
   useMeanSlope = .FALSE.
   useLatitude = .FALSE.
+  useBasinDeltaT = .FALSE.
+  NULLIFY(TFcorr_var)
   SELECT CASE(meltFunc)
   CASE('ISMIP6','ismip6')
      gamma0 =  GetConstReal( CurrentModel % Constants,'gamma 0',Found)
@@ -287,6 +290,36 @@
         Sloc_Perm => Sloc_var % Perm
      ELSE
         CALL FATAL(SolverName,'Cant find var Sloc')
+     END IF
+
+     ! Optional basin-wide thermal-forcing correction for the ISMIP7
+     ! calibration. It is deliberately opt-in so that an old ISMIP6
+     ! deltat_basin field cannot be applied accidentally.
+     useBasinDeltaT = GetLogical(SolverParams, &
+          'Use Basin Temperature Correction',Found)
+     IF (.NOT.Found) useBasinDeltaT = .FALSE.
+     IF (useBasinDeltaT) THEN
+        deltaTF_var => VariableGet(Model % Mesh % Variables,"deltat_basin")
+        IF (ASSOCIATED(deltaTF_var)) THEN
+           deltaTF_vals => deltaTF_var % Values
+           deltaTF_Perm => deltaTF_var % Perm
+           CALL INFO(SolverName, &
+                'Applying ISMIP7 basin temperature correction in degC',Level=3)
+        ELSE
+           CALL FATAL(SolverName, &
+                'Use Basin Temperature Correction is true but deltat_basin is missing')
+        END IF
+     ELSE
+        CALL INFO(SolverName, &
+             'ISMIP7 basin temperature correction disabled',Level=3)
+     END IF
+
+     ! Optional diagnostic output of the corrected thermal forcing. The
+     ! deltaT calibration SIF exports this variable; production SIFs need not.
+     TFcorr_var => VariableGet(Model % Mesh % Variables,"TFcorr")
+     IF (ASSOCIATED(TFcorr_var)) THEN
+        TFcorr_vals => TFcorr_var % Values
+        TFcorr_Perm => TFcorr_var % Perm
      END IF
 
      ! A constant Antarctic-mean sin(theta) is the ISMIP7 calibration baseline.
@@ -464,6 +497,7 @@
   Solver%Variable%Values = 0.0_dp
   IF (useDraftGradient .OR. useMeanSlope) sinTheta_vals = 0.0_dp
   IF (useLatitude) fCoriolis_vals = 0.0_dp
+  IF (ASSOCIATED(TFcorr_var)) TFcorr_vals = 0.0_dp
 
   DO ii=1,Model % NumberOfNodes
 
@@ -541,17 +575,42 @@
         END IF
      
      CASE('QuadraticLocal','quadratic-local','ismip7','ISMIP7','ismip7-localquad')
-         !  quadratic-local (aka ismip7-localquad) - local quadratic melt parameterisation
-         !  of Burgard et al. (2023), sensitive to slope (local or mean), salinity and Coriolis effects:
-         !  m = K * (rho_oc/rho_i) * (c_oc/L_i)^2 * betaS * Sloc * g/(2|f|)
-         !        * sin(theta) * |Tloc - Tfloc| * (Tloc - Tfloc)
-         ! D. Gwyther, C. Zhao. 2026
-         ! Here m is positive for melting, whereas the Elmer bmb variable is
-         ! bottom-surface accumulation and is therefore stored as bmb = -m.
+        ! Burgard et al. (2022) local-quadratic melt parameterisation, with
+        ! either an Antarctic-mean or a local ice-draft slope:
+        !  m = K * (rho_oc/rho_i) * (c_oc/L_i)^2 * betaS * Sloc * g/(2|f|)
+        !        * sin(theta) * |Tloc - Tfloc| * (Tloc - Tfloc)
+        ! D. Gwyther, C. Zhao. 2026
+        ! Here m is positive for melting, whereas the Elmer bmb variable is
+        ! bottom-surface accumulation and is therefore stored as bmb = -m.
         prefactor = (rhoo / rhoi) * (SWCp / Lf)**2.0_dp
         Tloc      = Tloc_vals(Tloc_Perm(ii))
         Tfloc     = Tfloc_vals(Tfloc_Perm(ii))
         Sloc      = Sloc_vals(Sloc_Perm(ii))
+        deltaTF   = 0.0_dp
+        IF (useBasinDeltaT) THEN
+        ! m = K*(rho_o/rho_i)*(c_o/L_i)^2*beta_S*S*g/(2*abs(f))
+        !       *sin(theta)*abs(T-T_f+deltaT_b)*(T-T_f+deltaT_b).
+        ! deltaT_b is applied only when the explicit solver switch is true;
+        ! otherwise deltaT_b=0, preserving the no-correction branch.
+           IF (deltaTF_Perm(ii).LE.0) THEN
+              CALL FATAL(SolverName, &
+                   'Missing deltat_basin permutation at an active floating node')
+           END IF
+           deltaTF = deltaTF_vals(deltaTF_Perm(ii))
+        END IF
+        TF = Tloc - Tfloc + deltaTF
+
+        IF (ASSOCIATED(TFcorr_var)) THEN
+           IF (TFcorr_Perm(ii).LE.0) THEN
+              CALL FATAL(SolverName, &
+                   'Missing TFcorr permutation at an active floating node')
+           END IF
+           TFcorr_vals(TFcorr_Perm(ii)) = TF
+        END IF
+
+        IF (fCoriolis_Perm(ii).LE.0) THEN
+           CALL FATAL(SolverName,'Missing fCoriolis permutation at an active floating node')
+        END IF
         fCoriolis = fCoriolis_vals(fCoriolis_Perm(ii))
 
         IF (ABS(fCoriolis) <= TINY(1.0_dp)) THEN
@@ -572,7 +631,7 @@
         END IF
 
         meltrate  = -K * prefactor * betaS * Sloc * (Gravity / (2.0_dp * ABS(fCoriolis))) &
-                     * sinTheta * ABS(Tloc - Tfloc) * (Tloc - Tfloc)
+                     * sinTheta * ABS(TF) * TF
       
      CASE ('linear','Linear')
         prefactor = z_iceBase%values(z_iceBase%Perm(ii))/depth_thresh
